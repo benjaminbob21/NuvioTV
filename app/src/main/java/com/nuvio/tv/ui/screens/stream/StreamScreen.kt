@@ -101,12 +101,15 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.delay as coroutineDelay
 import kotlinx.coroutines.launch as coroutineLaunch
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
 import android.util.Log
+
+private const val AUTO_PLAY_ATTEMPT_TIMEOUT_MS = 15_000L
 
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -255,6 +258,70 @@ fun StreamScreen(
         // User aborted the auto-next chain that navigated here — don't auto-launch; show the list.
         if (viewModel.isAutoNextContinuationAborted()) {
             viewModel.consumeAbortedAutoNextContinuation()
+            viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
+            return@LaunchedEffect
+        }
+        if (uiState.isDirectAutoPlayFlow) {
+            val preference = playerPreference ?: return@LaunchedEffect
+            val candidates = viewModel.getAutoPlayFallbackCandidates(stream)
+            for (candidate in candidates) {
+                val candidatePlaybackInfo = withTimeoutOrNull(AUTO_PLAY_ATTEMPT_TIMEOUT_MS) {
+                    viewModel.resolveStreamForPlayback(candidate)
+                } ?: continue
+                if (candidatePlaybackInfo.isTorrent && !p2pEnabled) {
+                    continue
+                }
+                val reachable = viewModel.isAutoPlayCandidateReachable(
+                    playbackInfo = candidatePlaybackInfo,
+                    timeoutMs = AUTO_PLAY_ATTEMPT_TIMEOUT_MS
+                )
+                if (!reachable) {
+                    continue
+                }
+
+                when (preference) {
+                    PlayerPreference.EXTERNAL -> {
+                        val url = candidatePlaybackInfo.url
+                            ?: if (candidatePlaybackInfo.isTorrent) {
+                                "torrent://${candidatePlaybackInfo.infoHash}"
+                            } else {
+                                null
+                            }
+                        if (url == null) continue
+
+                        val launched = withTimeoutOrNull(AUTO_PLAY_ATTEMPT_TIMEOUT_MS) {
+                            viewModel.launchExternalPlayer(
+                                playbackInfo = candidatePlaybackInfo,
+                                url = url,
+                                autoLaunch = true,
+                                context = context
+                            )
+                            coroutineDelay(1200)
+                            viewModel.isExternalPlayerActive()
+                        } ?: false
+                        if (!launched) {
+                            viewModel.stopExternalPlayerTracking()
+                            continue
+                        }
+                        coroutineDelay(1000)
+                        viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
+                        onBackPress()
+                        return@LaunchedEffect
+                    }
+                    PlayerPreference.ASK_EVERY_TIME -> {
+                        pendingPlaybackInfo = candidatePlaybackInfo
+                        showPlayerChoiceDialog = true
+                        viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
+                        return@LaunchedEffect
+                    }
+                    PlayerPreference.INTERNAL -> {
+                        viewModel.onInternalPlayerLaunching()
+                        onAutoPlayResolved(candidatePlaybackInfo)
+                        viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
+                        return@LaunchedEffect
+                    }
+                }
+            }
             viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
             return@LaunchedEffect
         }

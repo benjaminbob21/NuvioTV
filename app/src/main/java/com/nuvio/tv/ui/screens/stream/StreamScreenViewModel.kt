@@ -52,6 +52,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 private const val TAG = "StreamScreenViewModel"
@@ -338,15 +340,22 @@ class StreamScreenViewModel @Inject constructor(
         streamLoadJob = newScope.launch {
             streamLoadCompleted = false
             val playerSettings = playerSettingsDataStore.playerSettings.first()
+            val forceEpisodeDirectAutoPlay = !manualSelection && season != null && episode != null
+            val effectiveAutoPlayMode = if (forceEpisodeDirectAutoPlay) {
+                StreamAutoPlayMode.FIRST_STREAM
+            } else {
+                playerSettings.streamAutoPlayMode
+            }
             if (manualSelection) {
                 directAutoPlayModeInitializedForSession = true
                 directAutoPlayFlowEnabledForSession = false
                 autoPlayHandledForSession = true
             } else if (!directAutoPlayModeInitializedForSession) {
-                directAutoPlayFlowEnabledForSession = shouldUseDirectAutoPlayFlow(
-                    playerPreference = playerSettings.playerPreference,
-                    streamAutoPlayMode = playerSettings.streamAutoPlayMode
-                )
+                directAutoPlayFlowEnabledForSession = forceEpisodeDirectAutoPlay ||
+                    shouldUseDirectAutoPlayFlow(
+                        playerPreference = playerSettings.playerPreference,
+                        streamAutoPlayMode = playerSettings.streamAutoPlayMode
+                    )
                 // In MANUAL mode, still enable direct auto-play if a persisted
                 // binge group exists - same behavior as playNextEpisode in the player.
                 if (!directAutoPlayFlowEnabledForSession &&
@@ -362,7 +371,7 @@ class StreamScreenViewModel @Inject constructor(
             }
 
             if (
-                playerSettings.streamAutoPlayMode == StreamAutoPlayMode.REGEX_MATCH &&
+                effectiveAutoPlayMode == StreamAutoPlayMode.REGEX_MATCH &&
                 !StreamAutoPlayPolicy.isRegexSelectionConfigured(playerSettings.streamAutoPlayRegex)
             ) {
                 directAutoPlayFlowEnabledForSession = false
@@ -496,7 +505,7 @@ class StreamScreenViewModel @Inject constructor(
                 } else {
                     StreamAutoPlaySelector.selectAutoPlayStream(
                         streams = allStreams,
-                        mode = playerSettings.streamAutoPlayMode,
+                        mode = effectiveAutoPlayMode,
                         regexPattern = playerSettings.streamAutoPlayRegex,
                         source = playerSettings.streamAutoPlaySource,
                         installedAddonNames = installedAddonOrder.toSet(),
@@ -684,7 +693,7 @@ class StreamScreenViewModel @Inject constructor(
                                         }
                                     }
                                 }
-                            } else if (directFlowActive && persistedBingeGroup != null) {
+                            } else if (directFlowActive && persistedBingeGroup != null && !forceEpisodeDirectAutoPlay) {
                                 // Before timeout: eagerly check binge group only
                                 // (no fallback to FIRST_STREAM/REGEX yet). If a
                                 // match is found we can start playback immediately
@@ -695,7 +704,7 @@ class StreamScreenViewModel @Inject constructor(
                                 val allStreams = orderedStreams.flatMap { it.streams }
                                 val earlyMatch = StreamAutoPlaySelector.selectAutoPlayStream(
                                     streams = allStreams,
-                                    mode = playerSettings.streamAutoPlayMode,
+                                    mode = effectiveAutoPlayMode,
                                     regexPattern = playerSettings.streamAutoPlayRegex,
                                     source = playerSettings.streamAutoPlaySource,
                                     installedAddonNames = installedAddonOrder.toSet(),
@@ -768,50 +777,52 @@ class StreamScreenViewModel @Inject constructor(
                 }
             }
 
-            // Timeout semantics:
-            // - 0 (instant): timeoutElapsed immediately, first addon response
-            //   triggers auto-select; if no match -> dismiss overlay at once.
-            // - 1-30s (bounded): wait the configured delay, then auto-select
-            //   from whatever streams arrived; if no match -> dismiss overlay.
-            // - unlimited: check each addon response as it arrives; if a match
-            //   is found use it immediately; otherwise keep waiting until all
-            //   addons finish or the hard timeout (60s) forces a fallback.
-            val timeoutMs = playerSettings.streamAutoPlayTimeoutSeconds * 1_000L
-            if (PlayerSettings.isBoundedTimeout(playerSettings.streamAutoPlayTimeoutSeconds)) {
-                delay(timeoutMs)
-            }
-            timeoutElapsed = true
-            val directDebridLoadedByTimeout = !directDebridAvailable ||
-                lastSuccessData?.any { it.addonName in directDebridSourceNames } == true
-            if (!autoSelectTriggered && lastSuccessData != null && directDebridLoadedByTimeout) {
-                applySuccess(lastSuccessData, isAllLoaded = true)
-                if (resolvedAutoPlayTarget) {
-                    autoSelectTriggered = true
+            if (!forceEpisodeDirectAutoPlay) {
+                // Timeout semantics:
+                // - 0 (instant): timeoutElapsed immediately, first addon response
+                //   triggers auto-select; if no match -> dismiss overlay at once.
+                // - 1-30s (bounded): wait the configured delay, then auto-select
+                //   from whatever streams arrived; if no match -> dismiss overlay.
+                // - unlimited: check each addon response as it arrives; if a match
+                //   is found use it immediately; otherwise keep waiting until all
+                //   addons finish or the hard timeout (60s) forces a fallback.
+                val timeoutMs = playerSettings.streamAutoPlayTimeoutSeconds * 1_000L
+                if (PlayerSettings.isBoundedTimeout(playerSettings.streamAutoPlayTimeoutSeconds)) {
+                    delay(timeoutMs)
                 }
-            }
-
-            // For instant/bounded timeout: if streams arrived but no auto-play
-            // target was resolved, tear down the overlay immediately so the
-            // user sees the stream picker.
-            // For unlimited: keep the overlay — we continue checking as more
-            // addons respond until the hard timeout below.
-            if (directFlowActive && !resolvedAutoPlayTarget && lastSuccessData != null && !isUnlimitedTimeout) {
-                // If torrents are still pending cache check, the next emission
-                // will carry the result — don't tear down yet.
-                val hasCheckingTorrents = lastSuccessData?.any { group ->
-                    group.streams.any { s ->
-                        s.isTorrent() && s.debridCacheStatus?.state == com.nuvio.tv.domain.model.StreamDebridCacheState.CHECKING
+                timeoutElapsed = true
+                val directDebridLoadedByTimeout = !directDebridAvailable ||
+                    lastSuccessData?.any { it.addonName in directDebridSourceNames } == true
+                if (!autoSelectTriggered && lastSuccessData != null && directDebridLoadedByTimeout) {
+                    applySuccess(lastSuccessData, isAllLoaded = true)
+                    if (resolvedAutoPlayTarget) {
+                        autoSelectTriggered = true
                     }
-                } == true
-                if (!hasCheckingTorrents) {
-                    autoPlayHandledForSession = true
-                    directAutoPlayFlowEnabledForSession = false
-                    updateUiStateIfChanged {
-                        it.copy(
-                            isDirectAutoPlayFlow = false,
-                            showDirectAutoPlayOverlay = false,
-                            directAutoPlayMessage = null
-                        )
+                }
+
+                // For instant/bounded timeout: if streams arrived but no auto-play
+                // target was resolved, tear down the overlay immediately so the
+                // user sees the stream picker.
+                // For unlimited: keep the overlay — we continue checking as more
+                // addons respond until the hard timeout below.
+                if (directFlowActive && !resolvedAutoPlayTarget && lastSuccessData != null && !isUnlimitedTimeout) {
+                    // If torrents are still pending cache check, the next emission
+                    // will carry the result — don't tear down yet.
+                    val hasCheckingTorrents = lastSuccessData.any { group ->
+                        group.streams.any { s ->
+                            s.isTorrent() && s.debridCacheStatus?.state == com.nuvio.tv.domain.model.StreamDebridCacheState.CHECKING
+                        }
+                    }
+                    if (!hasCheckingTorrents) {
+                        autoPlayHandledForSession = true
+                        directAutoPlayFlowEnabledForSession = false
+                        updateUiStateIfChanged {
+                            it.copy(
+                                isDirectAutoPlayFlow = false,
+                                showDirectAutoPlayOverlay = false,
+                                directAutoPlayMessage = null
+                            )
+                        }
                     }
                 }
             }
@@ -1127,6 +1138,78 @@ class StreamScreenViewModel @Inject constructor(
                     filteredStreams = filteredStreams
                 )
             }
+        }
+    }
+
+    fun getAutoPlayFallbackCandidates(primary: Stream): List<Stream> {
+        val candidates = mutableListOf<Stream>()
+
+        fun addIfMissing(candidate: Stream) {
+            if (candidates.none { existing -> existing.matchesAutoPlayCandidate(candidate) }) {
+                candidates += candidate
+            }
+        }
+
+        addIfMissing(primary)
+        _uiState.value.allStreams.forEach(::addIfMissing)
+        return candidates
+    }
+
+    suspend fun isAutoPlayCandidateReachable(
+        playbackInfo: StreamPlaybackInfo,
+        timeoutMs: Long
+    ): Boolean {
+        if (playbackInfo.isExternal || playbackInfo.isTorrent) return true
+        val targetUrl = playbackInfo.url?.takeIf { it.isNotBlank() } ?: return false
+        val scheme = kotlin.runCatching { android.net.Uri.parse(targetUrl).scheme.orEmpty() }
+            .getOrDefault("")
+            .lowercase()
+        if (scheme !in setOf("http", "https")) return true
+
+        return withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val timeoutSeconds = maxOf(1L, timeoutMs / 1_000L)
+            val client = okhttp3.OkHttpClient.Builder()
+                .dns(com.nuvio.tv.core.network.IPv4FirstDns())
+                .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .build()
+
+            fun buildRequest(headOnly: Boolean): okhttp3.Request {
+                val builder = okhttp3.Request.Builder()
+                    .url(targetUrl)
+                playbackInfo.headers.orEmpty().forEach { (key, value) ->
+                    if (key.isNotBlank() && value.isNotBlank()) {
+                        builder.header(key, value)
+                    }
+                }
+                return if (headOnly) {
+                    builder.head().build()
+                } else {
+                    builder
+                        .header("Range", "bytes=0-0")
+                        .get()
+                        .build()
+                }
+            }
+
+            fun isReachableCode(code: Int): Boolean {
+                return code in 200..399 || code == 403 || code == 416
+            }
+
+            runCatching {
+                client.newCall(buildRequest(headOnly = true)).execute().use { response ->
+                    if (isReachableCode(response.code)) {
+                        return@runCatching true
+                    }
+                    if (response.code == 405 || response.code == 501) {
+                        client.newCall(buildRequest(headOnly = false)).execute().use { rangeResponse ->
+                            return@runCatching isReachableCode(rangeResponse.code)
+                        }
+                    }
+                    false
+                }
+            }.getOrDefault(false)
         }
     }
 
@@ -1843,6 +1926,28 @@ private fun Stream.badgeMergeKey(): String {
     }
     if (playableUrl != null) return "$addonName|$playableUrl"
     return "$addonName|${name}:${title}:${description?.hashCode() ?: 0}"
+}
+
+private fun Stream.matchesAutoPlayCandidate(other: Stream): Boolean {
+    if (addonName != other.addonName) return false
+
+    val thisInfoHash = getEffectiveInfoHash()?.lowercase()
+    val otherInfoHash = other.getEffectiveInfoHash()?.lowercase()
+    if (thisInfoHash != null || otherInfoHash != null) {
+        return thisInfoHash == otherInfoHash && getEffectiveFileIdx() == other.getEffectiveFileIdx()
+    }
+
+    val thisUrl = getStreamUrl()
+    val otherUrl = other.getStreamUrl()
+    if (!thisUrl.isNullOrBlank() || !otherUrl.isNullOrBlank()) {
+        return thisUrl == otherUrl
+    }
+
+    if (!ytId.isNullOrBlank() || !other.ytId.isNullOrBlank()) {
+        return ytId == other.ytId
+    }
+
+    return name == other.name && title == other.title && description == other.description
 }
 
 data class StreamPlaybackInfo(

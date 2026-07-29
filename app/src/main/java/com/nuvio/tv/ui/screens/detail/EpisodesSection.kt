@@ -284,6 +284,7 @@ fun EpisodesRow(
     val dedupedEpisodes = remember(episodes) { episodes.distinctBy { it.id } }
     val restoreTargetRequester = restoreEpisodeId?.let { episodeFocusRequesters[it] }
     var optionsEpisode by remember { mutableStateOf<Video?>(null) }
+    var playChoiceEpisode by remember { mutableStateOf<Video?>(null) }
     val cardMetrics = rememberEpisodeCardMetrics()
     val density = LocalDensity.current
     val rowPrefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 2) }
@@ -373,7 +374,7 @@ fun EpisodesRow(
             val imdbRating = remember(seasonEp, episodeRatings) { seasonEp?.let { episodeRatings[it] } }
             val isMarkedWatched = remember(seasonEp, watchedEpisodes) { seasonEp?.let { watchedEpisodes.contains(it) } ?: false }
             val episodeFocusRequester = remember(episode.id) { episodeFocusRequesters.getOrPut(episode.id) { FocusRequester() } }
-            val episodeOnClick = remember(episode.id) { { onEpisodeClick(episode) } }
+            val episodeOnClick = remember(episode.id) { { playChoiceEpisode = episode } }
             val episodeOnLongPress = remember(episode.id) { { optionsEpisode = episode } }
             val episodeOnFocused = remember(episode.id) { { onEpisodeFocused(episode.id) } }
             val isRestoreTarget = episode.id == restoreEpisodeId
@@ -462,6 +463,21 @@ fun EpisodesRow(
             }
         )
     }
+
+    playChoiceEpisode?.let { selectedEpisode: Video ->
+        EpisodePlayChoiceDialog(
+            episode = selectedEpisode,
+            onDismiss = { playChoiceEpisode = null },
+            onPlay = {
+                onEpisodeClick(selectedEpisode)
+                playChoiceEpisode = null
+            },
+            onSeeStreams = {
+                onEpisodeManualPlayClick(selectedEpisode)
+                playChoiceEpisode = null
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -475,6 +491,7 @@ private fun EpisodeCard(
     cardMetrics: EpisodeCardMetrics,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
+    showManualPlayOption: Boolean = false,
     upFocusRequester: FocusRequester,
     downFocusRequester: FocusRequester? = null,
     focusRequester: FocusRequester,
@@ -588,6 +605,7 @@ private fun EpisodeCard(
     val strCdWatched = stringResource(R.string.episodes_cd_watched)
     val strEpisode = stringResource(R.string.episodes_episode)
     val strUnavailable = stringResource(R.string.episodes_unavailable)
+    val strSources = stringResource(R.string.sources_title)
     val episodeCode = remember(episode.episode, strEpisode) {
         val prefix = strEpisode.uppercase(Locale.getDefault())
         episode.episode?.let { number -> "$prefix $number" } ?: prefix
@@ -631,7 +649,9 @@ private fun EpisodeCard(
             .onPreviewKeyEvent { event ->
                 val native = event.nativeKeyEvent
                 if (native.action == AndroidKeyEvent.ACTION_DOWN) {
-                    if (native.keyCode == AndroidKeyEvent.KEYCODE_MENU) {
+                    if (native.keyCode == AndroidKeyEvent.KEYCODE_MENU ||
+                        native.keyCode == AndroidKeyEvent.KEYCODE_INFO
+                    ) {
                         longPressTriggered = true
                         onLongPress()
                         return@onPreviewKeyEvent true
@@ -649,7 +669,9 @@ private fun EpisodeCard(
                 }
                 if (native.action == AndroidKeyEvent.ACTION_UP &&
                     longPressTriggered &&
-                    (isSelectKey(native.keyCode) || native.keyCode == AndroidKeyEvent.KEYCODE_MENU)
+                    (isSelectKey(native.keyCode) ||
+                        native.keyCode == AndroidKeyEvent.KEYCODE_MENU ||
+                        native.keyCode == AndroidKeyEvent.KEYCODE_INFO)
                 ) {
                     longPressTriggered = false
                     return@onPreviewKeyEvent true
@@ -924,6 +946,52 @@ private fun EpisodeCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun EpisodePlayChoiceDialog(
+    episode: Video,
+    onDismiss: () -> Unit,
+    onPlay: () -> Unit,
+    onSeeStreams: () -> Unit
+) {
+    val playFocusRequester = remember { FocusRequester() }
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        playFocusRequester.requestFocus()
+    }
+
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = episode.title.localizeEpisodeTitle(context),
+        subtitle = null
+    ) {
+        Button(
+            onClick = onPlay,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(playFocusRequester),
+            colors = ButtonDefaults.colors(
+                containerColor = NuvioTheme.colors.BackgroundCard,
+                contentColor = NuvioTheme.colors.TextPrimary
+            )
+        ) {
+            Text(stringResource(R.string.episodes_play))
+        }
+
+        Button(
+            onClick = onSeeStreams,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.colors(
+                containerColor = NuvioTheme.colors.BackgroundCard,
+                contentColor = NuvioTheme.colors.TextPrimary
+            )
+        ) {
+            Text(stringResource(R.string.sources_title))
         }
     }
 }
