@@ -52,7 +52,27 @@ jobs:
         run: |
           git fetch ${{ steps.upstream.outputs.upstream_remote }} ${{ inputs.upstream_branch || 'dev' }}
 
+      - name: Check for upstream changes
+        id: check
+        run: |
+          UPSTREAM_REF="${{ steps.upstream.outputs.upstream_remote }}/${{ inputs.upstream_branch || 'dev' }}"
+          LOCAL_REF="${{ inputs.base_branch || 'bobnuvio' }}"
+          CHANGES=$(git rev-list --count "HEAD..${UPSTREAM_REF}" 2>/dev/null || echo 0)
+          echo "Upstream commits ahead of ${LOCAL_REF}: ${CHANGES}"
+          if [ "$CHANGES" -eq 0 ]; then
+            echo "No upstream changes detected — skipping sync"
+            echo "has_upstream_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Upstream changes detected — proceeding with sync"
+            echo "has_upstream_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if no upstream changes (schedule only)
+        if: ${{ steps.check.outputs.has_upstream_changes == 'false' && github.event_name == 'schedule' }}
+        run: |
+          echo "::notice::No upstream changes since last sync — skipping"
       - name: Generate random branch name
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
         id: branch
         run: |
           RAND=$(openssl rand -hex 4)
@@ -61,11 +81,13 @@ jobs:
           echo "Created branch name: ${BRANCH}"
 
       - name: Create working branch
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
         run: |
           git checkout -b ${{ steps.branch.outputs.branch_name }}
           echo "Branch created"
 
       - name: Merge upstream
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
         id: merge
         run: |
           set +e
@@ -85,10 +107,12 @@ jobs:
           fi
 
       - name: Push working branch
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
         run: |
           git push origin ${{ steps.branch.outputs.branch_name }}
 
       - name: Create Pull Request
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,36 +122,24 @@ jobs:
           BRANCH="${{ steps.branch.outputs.branch_name }}"
           STATUS="${{ steps.merge.outputs.merge_status }}"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY_FILE=$(mktemp)
 
           if [ "$STATUS" = "success" ]; then
             TITLE="Sync upstream/$UPSTREAM -- Clean merge"
-            BODY_FILE=$(mktemp)
-            cat > "$BODY_FILE" <<EOFPR
-          ## Automated upstream sync - Clean merge
-
-          This PR was automatically created by the Sync upstream workflow to merge changes from upstream/\`$UPSTREAM\` into \`$BASE\`.
-
-          **Merge status:** No conflicts - safe to auto-merge.
-
-          - Branch: \`$BRANCH\`
-          - Upstream ref: upstream/$UPSTREAM
-          - Run: $RUN_URL
-          EOFPR
+            printf '## Automated upstream sync - Clean merge\n\n' > "$BODY_FILE"
+            printf 'This PR was automatically created by the Sync upstream workflow to merge changes from upstream/%s into %s.\n\n' "$UPSTREAM" "$BASE" >> "$BODY_FILE"
+            printf '**Merge status:** No conflicts - safe to auto-merge.\n\n' >> "$BODY_FILE"
+            printf -- '- Branch: `%s`\n' "$BRANCH" >> "$BODY_FILE"
+            printf -- '- Upstream ref: upstream/%s\n' "$UPSTREAM" >> "$BODY_FILE"
+            printf -- '- Run: %s\n' "$RUN_URL" >> "$BODY_FILE"
           else
             TITLE="Sync upstream/$UPSTREAM -- Merge conflict"
-            BODY_FILE=$(mktemp)
-            cat > "$BODY_FILE" <<EOFPR
-          ## Automated upstream sync - Merge conflict
-
-          This PR was automatically created by the Sync upstream workflow to merge changes from upstream/\`$UPSTREAM\` into \`$BASE\`.
-
-          **Merge status:** Conflicts detected - manual resolution required.
-
-          Please resolve the conflicts locally in branch \`$BRANCH\` and push to continue.
-
-          - Upstream ref: upstream/$UPSTREAM
-          - Run: $RUN_URL
-          EOFPR
+            printf '## Automated upstream sync - Merge conflict\n\n' > "$BODY_FILE"
+            printf 'This PR was automatically created by the Sync upstream workflow to merge changes from upstream/%s into %s.\n\n' "$UPSTREAM" "$BASE" >> "$BODY_FILE"
+            printf '**Merge status:** Conflicts detected - manual resolution required.\n\n' >> "$BODY_FILE"
+            printf 'Please resolve the conflicts locally in branch `%s` and push to continue.\n\n' "$BRANCH" >> "$BODY_FILE"
+            printf -- '- Upstream ref: upstream/%s\n' "$UPSTREAM" >> "$BODY_FILE"
+            printf -- '- Run: %s\n' "$RUN_URL" >> "$BODY_FILE"
           fi
 
           PR_URL=$(gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE") || true
@@ -142,7 +154,7 @@ jobs:
           echo "Created PR: #$PR_NUM"
 
       - name: Auto-merge PR (clean merges only)
-        if: ${{ inputs.auto_merge && steps.merge.outputs.merge_status == 'success' && steps.pr.outputs.pr_number != '' }}
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') && inputs.auto_merge && steps.merge.outputs.merge_status == 'success' && steps.pr.outputs.pr_number != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -155,7 +167,7 @@ jobs:
             || echo "::warning::Auto-merge failed (possibly missing approvals) - PR left open"
 
       - name: Flag conflict PR for review
-        if: ${{ steps.merge.outputs.merge_status == 'conflict' }}
+        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') && steps.merge.outputs.merge_status == 'conflict' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
