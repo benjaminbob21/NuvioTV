@@ -120,7 +120,7 @@ jobs:
           NEW_CODE="${{ steps.version.outputs.new_version_code }}"
           BASE="${{ inputs.base_branch || 'bobnuvio' }}"
 
-          git checkout -b "auto-release/${NEW_TAG}"
+          git checkout -B "auto-release/${NEW_TAG}"
           git add app/build.gradle.kts
           COMMIT_FILE=$(mktemp)
           {
@@ -132,7 +132,7 @@ jobs:
           } > "$COMMIT_FILE"
           git commit -F "$COMMIT_FILE"
           rm -f "$COMMIT_FILE"
-          git push origin "auto-release/${NEW_TAG}"
+          git push --force-with-lease origin "auto-release/${NEW_TAG}"
 
           BODY_FILE=$(mktemp)
           {
