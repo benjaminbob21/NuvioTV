@@ -1,7 +1,8 @@
 name: Auto release
 
-# This workflow handles recurring releases every 3 weeks.
-# It is distinct from sync-upstream.yml (weekly upstream sync).
+# Auto-bumps versionCode/versionName every 3 weeks (if there are new commits
+# since the last release), creates a PR, and triggers the release build when
+# merged. The actual APK build + GitHub release is handled by android-release.yml.
 
 on:
   workflow_dispatch:
@@ -10,20 +11,12 @@ on:
         description: "Target version name (e.g. b1.0.7). Leave empty to auto-increment."
         required: false
         default: ""
-      release_mode:
-        description: "Release mode"
-        required: true
-        type: choice
-        options:
-          - draft
-          - publish
-        default: draft
       base_branch:
         description: "Base branch for the version-bump PR"
         required: false
         default: bobnuvio
   schedule:
-    - cron: "0 8 * * 1"  # Every Monday — actual 3-week gating done in workflow
+    - cron: "0 8 * * 1"  # Every Monday at 08:00 UTC
 
 permissions:
   contents: write
@@ -31,20 +24,14 @@ permissions:
   actions: write
 
 jobs:
-  bump-version:
-    name: Bump version
+  release:
     runs-on: ubuntu-latest
-    outputs:
-      new_version_name: ${{ steps.version.outputs.new_version_name }}
-      new_version_code: ${{ steps.version.outputs.new_version_code }}
-      new_tag: ${{ steps.version.outputs.new_tag }}
-      pr_number: ${{ steps.pr.outputs.pr_number }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.base_branch || 'bobnuvio' }}
 
       - name: Configure git
         run: |
@@ -56,95 +43,73 @@ jobs:
         run: |
           LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "")
           if [ -z "$LATEST_TAG" ]; then
-            echo "No previous release tag found — proceeding with release"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "weeks_since_release=0" >> $GITHUB_OUTPUT
+            echo "No previous release tag found - proceeding"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           else
             COMMIT_COUNT=$(git rev-list --count "${LATEST_TAG}..HEAD" 2>/dev/null || echo 0)
-            echo "Commits since ${LATEST_TAG}: ${COMMIT_COUNT}"
-
-            # Check if 3 weeks (21 days) have passed since the tag was created
             TAG_DATE=$(git log -1 --format=%ct "${LATEST_TAG}" 2>/dev/null || echo 0)
             NOW=$(date +%s)
             DAYS_SINCE=$(( (NOW - TAG_DATE) / 86400 ))
             WEEKS_SINCE=$(( DAYS_SINCE / 7 ))
-            echo "Days since last release: ${DAYS_SINCE} (weeks: ${WEEKS_SINCE})"
-            echo "weeks_since_release=${WEEKS_SINCE}" >> $GITHUB_OUTPUT
+            echo "Commits since ${LATEST_TAG}: ${COMMIT_COUNT}"
+            echo "Weeks since last release: ${WEEKS_SINCE}"
 
             if [ "$COMMIT_COUNT" -eq 0 ]; then
-              echo "No new commits since last release (${LATEST_TAG}) — skipping"
-              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "No new code since last release - skipping"
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
             elif [ "$WEEKS_SINCE" -lt 3 ]; then
-              echo "Only ${WEEKS_SINCE} weeks since last release — waiting for 3-week window"
-              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "Only ${WEEKS_SINCE} weeks since last release - waiting for 3-week window"
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
             else
-              echo "Changes detected and 3+ weeks elapsed since last release — proceeding"
-              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "Changes detected and 3+ weeks elapsed - proceeding"
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
             fi
           fi
 
       - name: Skip if no changes (schedule only)
-        if: ${{ steps.changes.outputs.has_changes == 'false' && github.event_name == 'schedule' }}
+        if: steps.changes.outputs.has_changes == 'false' && github.event_name == 'schedule'
         run: |
-          echo "::notice::No changes since last release — skipping auto-release"
-          echo "RELEASE_SKIPPED=true" >> $GITHUB_ENV
-          exit 0
+          echo "::notice::No release needed - skipping (either no changes or less than 3 weeks since last release)"
 
       - name: Compute new version
-        if: ${{ (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
+        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
         id: version
         run: |
           VERSION_FILE="app/build.gradle.kts"
-          LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "b1.0.0")
-          echo "Latest tag: $LATEST_TAG"
+          LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "b0.0.0")
           TAG_VERSION="${LATEST_TAG#b}"
           MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
           MINOR=$(echo "$TAG_VERSION" | cut -d. -f2)
           PATCH=$(echo "$TAG_VERSION" | cut -d. -f3)
           CURRENT_CODE=$(grep -oP '(?<=versionCode = )\d+' "$VERSION_FILE" | head -1)
-          CURRENT_NAME=$(grep -oP '(?<=versionName = ")[^"]+' "$VERSION_FILE" | head -1)
-          echo "Current versionCode: $CURRENT_CODE"
-          echo "Current versionName: $CURRENT_NAME"
+          echo "Current: versionCode=$CURRENT_CODE, latest tag=$LATEST_TAG"
+
           if [ -n "${{ inputs.release_version }}" ]; then
             NEW_NAME="${{ inputs.release_version }}"
           else
             NEW_PATCH=$((PATCH + 1))
             NEW_NAME="${MAJOR}.${MINOR}.${NEW_PATCH}"
           fi
+
           NEW_CODE=$((CURRENT_CODE + 1))
           NEW_TAG="b${NEW_NAME}"
-          echo "new_version_name=${NEW_NAME}" >> $GITHUB_OUTPUT
-          echo "new_version_code=${NEW_CODE}" >> $GITHUB_OUTPUT
-          echo "new_tag=${NEW_TAG}" >> $GITHUB_OUTPUT
-          echo "New versionName: ${NEW_NAME}"
-          echo "New versionCode: ${NEW_CODE}"
-          echo "New tag: ${NEW_TAG}"
+
+          echo "new_version_name=${NEW_NAME}" >> "$GITHUB_OUTPUT"
+          echo "new_version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+          echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "New: versionName=b${NEW_NAME}, versionCode=${NEW_CODE}"
 
       - name: Update version in gradle
-        if: ${{ (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
+        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
         run: |
           VERSION_FILE="app/build.gradle.kts"
-          sed -i -E "s|^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*\x24|\1${{ steps.version.outputs.new_version_code }}|" "$VERSION_FILE"
-          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*(\".*)\x24|\1b${{ steps.version.outputs.new_version_name }}\2|" "$VERSION_FILE"
+          sed -i -E "s|^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*|\1${{ steps.version.outputs.new_version_code }}|" "$VERSION_FILE"
+          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*(\".*)\$|\1b${{ steps.version.outputs.new_version_name }}\2|" "$VERSION_FILE"
           echo "--- Updated version:"
           grep -E "versionCode|versionName" "$VERSION_FILE"
 
-      - name: Commit version bump
-        if: ${{ (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
-        run: |
-          git checkout -b "auto-release/${{ steps.version.outputs.new_tag }}"
-          git add app/build.gradle.kts
-          COMMIT_FILE=$(mktemp)
-          printf 'bump version to b%s (auto-release)\n\n' "${{ steps.version.outputs.new_version_name }}" > "$COMMIT_FILE"
-          printf 'Auto-generated by the Auto release workflow.\n\n' >> "$COMMIT_FILE"
-          printf -- '- versionCode: %s\n' "${{ steps.version.outputs.new_version_code }}" >> "$COMMIT_FILE"
-          printf -- '- versionName: b%s\n' "${{ steps.version.outputs.new_version_name }}" >> "$COMMIT_FILE"
-          git commit -F "$COMMIT_FILE"
-          rm -f "$COMMIT_FILE"
-          git push origin "auto-release/${{ steps.version.outputs.new_tag }}"
-
       - name: Create version-bump PR
-        if: ${{ (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
+        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -153,39 +118,47 @@ jobs:
           NEW_NAME="${{ steps.version.outputs.new_version_name }}"
           NEW_CODE="${{ steps.version.outputs.new_version_code }}"
           BASE="${{ inputs.base_branch || 'bobnuvio' }}"
-          MODE="${{ inputs.release_mode || 'draft' }}"
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          BODY_FILE=$(mktemp)
-          printf '## Auto-release version bump\n\n' > "$BODY_FILE"
-          printf 'This PR was automatically created by the **Auto release** workflow.\n\n' >> "$BODY_FILE"
-          printf '**New version:** `b%s` (versionCode: %s)\n\n' "$NEW_NAME" "$NEW_CODE" >> "$BODY_FILE"
+
+          git checkout -b "auto-release/${NEW_TAG}"
+          git add app/build.gradle.kts
+          COMMIT_FILE=$(mktemp)
           {
-            echo "- Base: \`$BASE\`"
-            echo "- Tag: \`b${NEW_NAME}\`"
-            echo "- Mode: \`${MODE}\`"
+            printf 'bump version to b%s\n\n' "$NEW_NAME"
+            echo "Auto-generated by the Auto release workflow."
             echo ""
-            echo "> After PR merges, dispatch \`android-release.yml\` in \`${MODE}\` mode with ref = \`${BASE}\` and the version bump commit."
+            echo "- versionCode: ${NEW_CODE}"
+            echo "- versionName: b${NEW_NAME}"
+          } > "$COMMIT_FILE"
+          git commit -F "$COMMIT_FILE"
+          rm -f "$COMMIT_FILE"
+          git push origin "auto-release/${NEW_TAG}"
+
+          BODY_FILE=$(mktemp)
+          {
+            echo "## Auto-release version bump"
             echo ""
-            echo "Run: ${RUN_URL}"
-          } >> "$BODY_FILE"
-          PR_URL=$(gh pr create --base "$BASE" --head "auto-release/$NEW_TAG" --title "bump version to b${NEW_NAME}" --body-file "$BODY_FILE") || true
+            echo "New version: **b${NEW_NAME}** (versionCode: ${NEW_CODE})"
+            echo ""
+            echo "- Base: \`${BASE}\`"
+            echo "- Branch: \`auto-release/${NEW_TAG}\`"
+          } > "$BODY_FILE"
+
+          PR_NUM=$(
+            gh pr create \
+              --base "$BASE" \
+              --head "auto-release/${NEW_TAG}" \
+              --title "bump version to b${NEW_NAME}" \
+              --body-file "$BODY_FILE" \
+              --json number --template '{{ .number }}'
+          ) || {
+            # PR might already exist
+            PR_NUM=$(gh pr list --head "auto-release/${NEW_TAG}" --state open --json number -q '.[0].number')
+          }
           rm -f "$BODY_FILE"
-          PR_NUM=$(echo "$PR_URL" | grep -oP 'pull/\K[0-9]+' | head -1 || true)
-          if [ -z "$PR_NUM" ]; then
-            PR_NUM=$(gh pr list --head "auto-release/$NEW_TAG" --state open --json number -q '.[0].number' || true)
-          fi
 
           if [ -n "$PR_NUM" ]; then
-            gh pr edit "$PR_NUM" --add-label "auto-release,version-bump" 2>/dev/null || echo "Labels already exist or could not be added"
+            gh pr edit "$PR_NUM" --add-label "auto-release,version-bump" 2>/dev/null || true
           fi
 
-          echo "pr_number=${PR_NUM}" >> $GITHUB_OUTPUT
+          echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
           echo "Created version-bump PR: #${PR_NUM}"
-
-      - name: Notify on publish
-        if: ${{ inputs.release_mode == 'publish' && (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "::notice::Version bump PR #${{ steps.pr.outputs.pr_number }} is ready."
-          echo "::notice::After PR merges, dispatch android-release.yml in 'publish' mode with ref = bobnuvio and the version bump commit."

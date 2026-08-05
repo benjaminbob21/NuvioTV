@@ -1,174 +1,83 @@
 name: Sync upstream
 
+# Merges upstream/dev into bobnuvio when upstream has new commits.
+# Simple: check for changes, merge if needed, push result directly.
+
 on:
   workflow_dispatch:
     inputs:
       upstream_branch:
-        description: "Upstream branch to sync from"
+        description: "Upstream branch to merge from"
         required: false
         default: dev
       base_branch:
-        description: "Base branch to merge into (your fork branch)"
+        description: "Fork branch to merge into"
         required: false
         default: bobnuvio
-      auto_merge:
-        description: "Auto-merge PR if there are no conflicts"
-        required: false
-        default: true
-        type: boolean
   schedule:
-    - cron: "0 6 * * 1"   # Weekly on Monday at 06:00 UTC
+    - cron: "0 6 * * 1"  # Every Monday at 06:00 UTC
+
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.base_branch || 'bobnuvio' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "4189+github-actions[bot]@users.noreply.github.com"
 
-      - name: Identify upstream remote
-        id: upstream
+      - name: Add upstream remote
         run: |
-          if git remote | grep -q '^upstream'; then
-            echo "upstream_remote=upstream" >> $GITHUB_OUTPUT
-          else
-            echo "upstream remote not found, falling back to origin"
-            echo "upstream_remote=origin" >> $GITHUB_OUTPUT
+          if ! git remote | grep -q '^upstream'; then
+            git remote add upstream https://github.com/NuvioMedia/NuvioTV.git
           fi
+          git fetch upstream ${{ inputs.upstream_branch || 'dev' }}
 
-      - name: Fetch upstream
-        run: |
-          git fetch ${{ steps.upstream.outputs.upstream_remote }} ${{ inputs.upstream_branch || 'dev' }}
-
-      - name: Check for upstream changes
+      - name: Check if upstream has new commits
         id: check
         run: |
-          UPSTREAM_REF="${{ steps.upstream.outputs.upstream_remote }}/${{ inputs.upstream_branch || 'dev' }}"
-          LOCAL_REF="${{ inputs.base_branch || 'bobnuvio' }}"
-          CHANGES=$(git rev-list --count "HEAD..${UPSTREAM_REF}" 2>/dev/null || echo 0)
-          echo "Upstream commits ahead of ${LOCAL_REF}: ${CHANGES}"
-          if [ "$CHANGES" -eq 0 ]; then
-            echo "No upstream changes detected — skipping sync"
-            echo "has_upstream_changes=false" >> $GITHUB_OUTPUT
+          UPSTREAM_REF="upstream/${{ inputs.upstream_branch || 'dev' }}"
+          AHEAD=$(git rev-list --count "HEAD..${UPSTREAM_REF}" 2>/dev/null || echo 0)
+          echo "Commits upstream ahead of bobnuvio: ${AHEAD}"
+          if [ "$AHEAD" -eq 0 ]; then
+            echo "No upstream changes — nothing to sync"
+            echo "needs_sync=false" >> $GITHUB_OUTPUT
           else
-            echo "Upstream changes detected — proceeding with sync"
-            echo "has_upstream_changes=true" >> $GITHUB_OUTPUT
+            echo "Upstream has ${AHEAD} new commits"
+            echo "needs_sync=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Skip if no upstream changes (schedule only)
-        if: ${{ steps.check.outputs.has_upstream_changes == 'false' && github.event_name == 'schedule' }}
+      - name: Skip (no changes on schedule)
+        if: ${{ steps.check.outputs.needs_sync == 'false' && github.event_name == 'schedule' }}
         run: |
           echo "::notice::No upstream changes since last sync — skipping"
-      - name: Generate random branch name
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
-        id: branch
+
+      - name: Merge upstream into bobnuvio
+        if: ${{ steps.check.outputs.needs_sync == 'true' }}
         run: |
-          RAND=$(openssl rand -hex 4)
-          BRANCH="sync-upstream-${RAND}"
-          echo "branch_name=${BRANCH}" >> $GITHUB_OUTPUT
-          echo "Created branch name: ${BRANCH}"
+          UPSTREAM_REF="upstream/${{ inputs.upstream_branch || 'dev' }}"
+          echo "Merging ${UPSTREAM_REF} into HEAD..."
+          MERGE_MSG=$(mktemp)
+          printf 'chore: sync upstream/%s\n\n' "${{ inputs.upstream_branch || 'dev' }}" > "$MERGE_MSG"
+          printf 'Merged %s into %s.\n\n' "$UPSTREAM_REF" "${{ inputs.base_branch || 'bobnuvio' }}" >> "$MERGE_MSG"
+          printf 'Automated by sync-upstream workflow.\n' >> "$MERGE_MSG"
+          printf 'Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n' >> "$MERGE_MSG"
+          git merge --no-ff "${UPSTREAM_REF}" -F "$MERGE_MSG"
+          rm -f "$MERGE_MSG"
+          echo "Merge complete"
 
-      - name: Create working branch
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
+      - name: Push merged bobnuvio
+        if: ${{ steps.check.outputs.needs_sync == 'true' }}
         run: |
-          git checkout -b ${{ steps.branch.outputs.branch_name }}
-          echo "Branch created"
-
-      - name: Merge upstream
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
-        id: merge
-        run: |
-          set +e
-          git merge --no-ff --no-commit ${{ steps.upstream.outputs.upstream_remote }}/${{ inputs.upstream_branch || 'dev' }} \
-            -m "Merge upstream/${{ inputs.upstream_branch || 'dev' }} into ${{ steps.branch.outputs.branch_name }}" 2>&1
-          EXIT_CODE=$?
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "merge_status=success" >> $GITHUB_OUTPUT
-            echo "Merge succeeded cleanly"
-            git commit --allow-empty -m "Merge upstream/${{ inputs.upstream_branch || 'dev' }} (no changes)" 2>/dev/null || true
-          elif git rev-parse --verify MERGE_HEAD 2>/dev/null; then
-            echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            echo "::warning::Merge conflict detected - PR will be marked for manual review"
-          else
-            echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            echo "::warning::Merge resulted in conflict - PR will be marked for manual review"
-          fi
-
-      - name: Push working branch
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
-        run: |
-          git push origin ${{ steps.branch.outputs.branch_name }}
-
-      - name: Create Pull Request
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') }}
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          UPSTREAM="${{ inputs.upstream_branch || 'dev' }}"
-          BASE="${{ inputs.base_branch || 'bobnuvio' }}"
-          BRANCH="${{ steps.branch.outputs.branch_name }}"
-          STATUS="${{ steps.merge.outputs.merge_status }}"
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          BODY_FILE=$(mktemp)
-
-          if [ "$STATUS" = "success" ]; then
-            TITLE="Sync upstream/$UPSTREAM -- Clean merge"
-            printf '## Automated upstream sync - Clean merge\n\n' > "$BODY_FILE"
-            printf 'This PR was automatically created by the Sync upstream workflow to merge changes from upstream/%s into %s.\n\n' "$UPSTREAM" "$BASE" >> "$BODY_FILE"
-            printf '**Merge status:** No conflicts - safe to auto-merge.\n\n' >> "$BODY_FILE"
-            printf -- '- Branch: `%s`\n' "$BRANCH" >> "$BODY_FILE"
-            printf -- '- Upstream ref: upstream/%s\n' "$UPSTREAM" >> "$BODY_FILE"
-            printf -- '- Run: %s\n' "$RUN_URL" >> "$BODY_FILE"
-          else
-            TITLE="Sync upstream/$UPSTREAM -- Merge conflict"
-            printf '## Automated upstream sync - Merge conflict\n\n' > "$BODY_FILE"
-            printf 'This PR was automatically created by the Sync upstream workflow to merge changes from upstream/%s into %s.\n\n' "$UPSTREAM" "$BASE" >> "$BODY_FILE"
-            printf '**Merge status:** Conflicts detected - manual resolution required.\n\n' >> "$BODY_FILE"
-            printf 'Please resolve the conflicts locally in branch `%s` and push to continue.\n\n' "$BRANCH" >> "$BODY_FILE"
-            printf -- '- Upstream ref: upstream/%s\n' "$UPSTREAM" >> "$BODY_FILE"
-            printf -- '- Run: %s\n' "$RUN_URL" >> "$BODY_FILE"
-          fi
-
-          PR_URL=$(gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE") || true
-          rm -f "$BODY_FILE"
-
-          PR_NUM=$(echo "$PR_URL" | grep -oP 'pull/\K[0-9]+' | head -1 || true)
-          if [ -z "$PR_NUM" ]; then
-            PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' || true)
-          fi
-
-          echo "pr_number=$PR_NUM" >> $GITHUB_OUTPUT
-          echo "Created PR: #$PR_NUM"
-
-      - name: Auto-merge PR (clean merges only)
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') && inputs.auto_merge && steps.merge.outputs.merge_status == 'success' && steps.pr.outputs.pr_number != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Auto-merging PR #${{ steps.pr.outputs.pr_number }}"
-          gh pr merge "${{ steps.pr.outputs.pr_number }}" \
-            --admin \
-            --merge \
-            --subject "chore: auto-merge upstream sync" \
-            --body "Merged upstream/${{ inputs.upstream_branch || 'dev' }} into ${{ inputs.base_branch || 'bobnuvio' }} (automated)" \
-            || echo "::warning::Auto-merge failed (possibly missing approvals) - PR left open"
-
-      - name: Flag conflict PR for review
-        if: ${{ (steps.check.outputs.has_upstream_changes == 'true' || github.event_name != 'schedule') && steps.merge.outputs.merge_status == 'conflict' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "::error::Merge conflict in PR #${{ steps.pr.outputs.pr_number || 'N/A' }} - manual resolution required in branch ${{ steps.branch.outputs.branch_name }}"
+          git push origin "${{ inputs.base_branch || 'bobnuvio' }}"
+          echo "::notice::Successfully merged upstream/${{ inputs.upstream_branch || 'dev' }} into ${{ inputs.base_branch || 'bobnuvio' }}"
