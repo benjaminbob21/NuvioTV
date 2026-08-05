@@ -144,18 +144,21 @@ jobs:
             echo "- Branch: \`auto-release/${NEW_TAG}\`"
           } > "$BODY_FILE"
 
-          PR_NUM=$(
+          PR_URL=$(
             gh pr create \
               --base "$BASE" \
               --head "auto-release/${NEW_TAG}" \
               --title "bump version to b${NEW_NAME}" \
               --body-file "$BODY_FILE" \
-              --json number --template '{{ .number }}'
-          ) || {
+              2>&1 || true
+          )
+          rm -f "$BODY_FILE"
+
+          PR_NUM=$(echo "$PR_URL" | grep -oP 'pull/\K[0-9]+' | head -1 || true)
+          if [ -z "$PR_NUM" ]; then
             # PR might already exist
             PR_NUM=$(gh pr list --head "auto-release/${NEW_TAG}" --state open --json number -q '.[0].number')
-          }
-          rm -f "$BODY_FILE"
+          fi
 
           if [ -n "$PR_NUM" ]; then
             gh pr edit "$PR_NUM" --add-label "auto-release,version-bump" 2>/dev/null || true
