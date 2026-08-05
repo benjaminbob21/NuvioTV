@@ -1,37 +1,56 @@
 name: Auto release
 
-# Auto-bumps versionCode/versionName every 3 weeks (if there are new commits
-# since the last release), creates a PR, and triggers the release build when
-# merged. The actual APK build + GitHub release is handled by android-release.yml.
+# Single workflow that handles the full release flow:
+#   1. Checks if 3+ weeks since last release and new commits exist
+#   2. Bumps versionCode + versionName in app/build.gradle.kts
+#   3. Commits + tags the version bump
+#   4. Builds full release APKs (2 flavors: full & playstore)
+#   5. Creates a GitHub release with APKs + auto-generated release notes
+#
+# Triggers:
+#   - workflow_dispatch: Manual run (bypasses 3-week gate)
+#   - schedule: Weekly on Monday at 08:00 UTC (gated to every 3 weeks)
 
 on:
   workflow_dispatch:
     inputs:
-      release_version:
-        description: "Target version name (e.g. b1.0.7). Leave empty to auto-increment."
-        required: false
-        default: ""
-      base_branch:
-        description: "Base branch for the version-bump PR"
-        required: false
-        default: bobnuvio
+      mode:
+        description: "release or dry-run"
+        required: true
+        type: choice
+        options:
+          - release
+          - dry-run
+        default: release
   schedule:
     - cron: "0 8 * * 1"  # Every Monday at 08:00 UTC
 
 permissions:
   contents: write
-  pull-requests: write
   actions: write
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
+    name: Auto release
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOCAL_PROPERTIES_BASE64: ${{ secrets.LOCAL_PROPERTIES_BASE64 }}
+      LOCAL_DEV_PROPERTIES_BASE64: ${{ secrets.LOCAL_DEV_PROPERTIES_BASE64 }}
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.NUVIO_RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_KEY_ALIAS: ${{ secrets.NUVIO_RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.NUVIO_RELEASE_KEY_PASSWORD }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.NUVIO_RELEASE_STORE_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ inputs.base_branch || 'bobnuvio' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           submodules: false
 
       - name: Configure git
@@ -39,89 +58,98 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check for changes since last release
-        id: changes
+      - name: Check gates (3-week + changes since last release)
+        id: gates
         run: |
+          # Only enforce gates on scheduled runs, not manual dispatch
+          if [[ "${{ inputs.mode }}" == "dry-run" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "")
           if [ -z "$LATEST_TAG" ]; then
-            echo "No previous release tag found - proceeding"
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "No previous release tag — proceeding"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             COMMIT_COUNT=$(git rev-list --count "${LATEST_TAG}..HEAD" 2>/dev/null || echo 0)
             TAG_DATE=$(git log -1 --format=%ct "${LATEST_TAG}" 2>/dev/null || echo 0)
             NOW=$(date +%s)
             DAYS_SINCE=$(( (NOW - TAG_DATE) / 86400 ))
             WEEKS_SINCE=$(( DAYS_SINCE / 7 ))
+
             echo "Commits since ${LATEST_TAG}: ${COMMIT_COUNT}"
             echo "Weeks since last release: ${WEEKS_SINCE}"
 
             if [ "$COMMIT_COUNT" -eq 0 ]; then
-              echo "No new code since last release - skipping"
-              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "No new code since last release — skipping"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
             elif [ "$WEEKS_SINCE" -lt 3 ]; then
-              echo "Only ${WEEKS_SINCE} weeks since last release - waiting for 3-week window"
-              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "Only ${WEEKS_SINCE} weeks since last release — skipping (3-week gate)"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
             else
-              echo "Changes detected and 3+ weeks elapsed - proceeding"
-              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+              echo "Proceeding with release"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
             fi
           fi
 
-      - name: Skip if no changes (schedule only)
-        if: steps.changes.outputs.has_changes == 'false' && github.event_name == 'schedule'
+      - name: Skip release
+        if: steps.gates.outputs.skip == 'true'
         run: |
-          echo "::notice::No release needed - skipping (either no changes or less than 3 weeks since last release)"
+          echo "::notice::Skip auto-release — no changes or less than 3 weeks since last release"
 
       - name: Compute new version
-        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
         id: version
+        if: steps.gates.outputs.skip != 'true'
         run: |
           VERSION_FILE="app/build.gradle.kts"
-          LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "b0.0.0")
+          LATEST_TAG=$(git describe --tags --abbrev=0 --match "b*" 2>/dev/null || echo "")
           TAG_VERSION="${LATEST_TAG#b}"
-          MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
-          MINOR=$(echo "$TAG_VERSION" | cut -d. -f2)
-          PATCH=$(echo "$TAG_VERSION" | cut -d. -f3)
+          TAG_MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
+          TAG_MINOR=$(echo "$TAG_VERSION" | cut -d. -f2)
+          TAG_PATCH=$(echo "$TAG_VERSION" | cut -d. -f3)
           CURRENT_CODE=$(grep -oP '(?<=versionCode = )\d+' "$VERSION_FILE" | head -1)
-          echo "Current: versionCode=$CURRENT_CODE, latest tag=$LATEST_TAG"
+          CURRENT_NAME=$(grep -oP '(?<=versionName = ")[^"]+' "$VERSION_FILE" | head -1)
+          echo "Current: versionCode=$CURRENT_CODE, versionName=$CURRENT_NAME, latest tag=$LATEST_TAG"
 
-          if [ -n "${{ inputs.release_version }}" ]; then
-            NEW_NAME="${{ inputs.release_version }}"
-          else
-            NEW_PATCH=$((PATCH + 1))
-            NEW_NAME="${MAJOR}.${MINOR}.${NEW_PATCH}"
-          fi
+          # Bump versionName (strip -beta suffix for parsing, then re-add)
+          BASE_NAME="${CURRENT_NAME%-beta}"
+          NM_MAJOR=$(echo "$BASE_NAME" | cut -d. -f1)
+          NM_MINOR=$(echo "$BASE_NAME" | cut -d. -f2)
+          NM_PATCH=$(echo "$BASE_NAME" | cut -d. -f3)
 
+          NEW_NM_PATCH=$((NM_PATCH + 1))
+          NEW_NAME="${NM_MAJOR}.${NM_MINOR}.${NEW_NM_PATCH}-beta"
           NEW_CODE=$((CURRENT_CODE + 1))
-          NEW_TAG="b${NEW_NAME}"
+
+          # Tag: bump the b1.0.X patch from latest tag
+          if [ -n "$LATEST_TAG" ]; then
+            NEW_TAG_PATCH=$((TAG_PATCH + 1))
+            NEW_TAG="b${TAG_MAJOR}.${TAG_MINOR}.${NEW_TAG_PATCH}"
+          else
+            NEW_TAG="b${NEW_NAME}"
+          fi
 
           echo "new_version_name=${NEW_NAME}" >> "$GITHUB_OUTPUT"
           echo "new_version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
           echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
-          echo "New: versionName=b${NEW_NAME}, versionCode=${NEW_CODE}"
+          echo "New: versionName=b${NEW_NAME}, versionCode=${NEW_CODE}, tag=${NEW_TAG}"
 
-      - name: Update version in gradle
-        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
+      - name: Bump version
+        id: bump
+        if: steps.gates.outputs.skip != 'true'
         run: |
           VERSION_FILE="app/build.gradle.kts"
           sed -i -E "s|^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*|\1${{ steps.version.outputs.new_version_code }}|" "$VERSION_FILE"
-          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*(\".*)\$|\1b${{ steps.version.outputs.new_version_name }}\2|" "$VERSION_FILE"
-          echo "--- Updated version:"
+          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*(\".*)\$|\1${{ steps.version.outputs.new_version_name }}\2|" "$VERSION_FILE"
           grep -E "versionCode|versionName" "$VERSION_FILE"
 
-      - name: Create version-bump PR
-        if: steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule'
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit version bump
+        if: steps.gates.outputs.skip != 'true'
         run: |
           NEW_TAG="${{ steps.version.outputs.new_tag }}"
           NEW_NAME="${{ steps.version.outputs.new_version_name }}"
           NEW_CODE="${{ steps.version.outputs.new_version_code }}"
-          BASE="${{ inputs.base_branch || 'bobnuvio' }}"
-
-          git checkout -B "auto-release/${NEW_TAG}"
-          git add app/build.gradle.kts
           COMMIT_FILE=$(mktemp)
           {
             printf 'bump version to b%s\n\n' "$NEW_NAME"
@@ -130,39 +158,114 @@ jobs:
             echo "- versionCode: ${NEW_CODE}"
             echo "- versionName: b${NEW_NAME}"
           } > "$COMMIT_FILE"
+          git add app/build.gradle.kts
           git commit -F "$COMMIT_FILE"
           rm -f "$COMMIT_FILE"
-          git push --force-with-lease origin "auto-release/${NEW_TAG}"
 
-          BODY_FILE=$(mktemp)
-          {
-            echo "## Auto-release version bump"
-            echo ""
-            echo "New version: **b${NEW_NAME}** (versionCode: ${NEW_CODE})"
-            echo ""
-            echo "- Base: \`${BASE}\`"
-            echo "- Branch: \`auto-release/${NEW_TAG}\`"
-          } > "$BODY_FILE"
+      - name: Set up Java
+        if: steps.gates.outputs.skip != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
 
-          PR_URL=$(
-            gh pr create \
-              --base "$BASE" \
-              --head "auto-release/${NEW_TAG}" \
-              --title "bump version to b${NEW_NAME}" \
-              --body-file "$BODY_FILE" \
-              2>&1 || true
+      - name: Set up Gradle
+        if: steps.gates.outputs.skip != 'true'
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Configure release properties
+        if: steps.gates.outputs.skip != 'true'
+        run: |
+          keystore_path="${RUNNER_TEMP}/nuviotv-release.jks"
+          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
+          printf '%s' "${LOCAL_PROPERTIES_BASE64}" | base64 --decode > local.properties
+
+          if [[ -n "${LOCAL_DEV_PROPERTIES_BASE64}" ]]; then
+            printf '%s' "${LOCAL_DEV_PROPERTIES_BASE64}" | base64 --decode > local.dev.properties
+          fi
+
+          set_property() {
+            local property_name="$1"
+            local property_value="$2"
+            [[ -n "${property_value}" ]] || return 0
+            sed -i -E "/^[[:space:]]*${property_name}[[:space:]]*=/d" local.properties
+            printf '\n%s=%s\n' "${property_name}" "${property_value}" >> local.properties
+          }
+
+          sed -i -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          set_property NUVIO_RELEASE_STORE_FILE "${keystore_path}"
+          set_property NUVIO_RELEASE_KEY_ALIAS "${RELEASE_KEY_ALIAS}"
+          set_property NUVIO_RELEASE_KEY_PASSWORD "${RELEASE_KEY_PASSWORD}"
+          set_property NUVIO_RELEASE_STORE_PASSWORD "${RELEASE_STORE_PASSWORD}"
+
+          required_properties=(
+            NUVIO_RELEASE_STORE_PASSWORD
+            NUVIO_RELEASE_KEY_ALIAS
+            NUVIO_RELEASE_KEY_PASSWORD
+            TRAKT_CLIENT_ID
+            TRAKT_CLIENT_SECRET
           )
-          rm -f "$BODY_FILE"
+          for property_name in "${required_properties[@]}"; do
+            if ! grep -Eq "^[[:space:]]*${property_name}[[:space:]]*=[[:space:]]*.+$" local.properties; then
+              echo "Missing required property: ${property_name}" >&2
+              exit 1
+            fi
+          done
 
-          PR_NUM=$(echo "$PR_URL" | grep -oP 'pull/\K[0-9]+' | head -1 || true)
-          if [ -z "$PR_NUM" ]; then
-            # PR might already exist
-            PR_NUM=$(gh pr list --head "auto-release/${NEW_TAG}" --state open --json number -q '.[0].number')
+      - name: Read release metadata
+        if: steps.gates.outputs.skip != 'true'
+        id: release
+        run: ./scripts/release-metadata.sh "${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        if: steps.gates.outputs.skip != 'true'
+        env:
+          PREVIOUS_BUMP: ${{ steps.release.outputs.previous_bump }}
+          CURRENT_BUMP: ${{ steps.release.outputs.current_bump }}
+        run: |
+          ./scripts/generate-release-notes.sh \
+            --from "${PREVIOUS_BUMP}" \
+            --to "${CURRENT_BUMP}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            > release-notes.md
+
+      - name: Build release APKs
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
+        run: ./gradlew :app:assembleFullRelease :app:assemblePlaystoreRelease --stacktrace
+
+      - name: Upload build artifacts
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nuviotv-${{ steps.version.outputs.new_tag }}-${{ inputs.mode }}
+          path: |
+            app/build/outputs/apk/full/release/*.apk
+            app/build/outputs/apk/playstore/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Tag and push release commit
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
+        run: |
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          echo "Tagging ${NEW_TAG}..."
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+
+      - name: Create GitHub release
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.new_tag }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
+        run: |
+          mapfile -t release_apks < <(find app/build/outputs/apk/full/release app/build/outputs/apk/playstore/release -maxdepth 1 -type f -name '*.apk' -print | sort)
+          if (( ${#release_apks[@]} == 0 )); then
+            echo "No release APKs were produced." >&2
+            exit 1
           fi
 
-          if [ -n "$PR_NUM" ]; then
-            gh pr edit "$PR_NUM" --add-label "auto-release,version-bump" 2>/dev/null || true
-          fi
-
-          echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
-          echo "Created version-bump PR: #${PR_NUM}"
+          gh release create "${RELEASE_TAG}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file release-notes.md \
+            "${release_apks[@]}"
