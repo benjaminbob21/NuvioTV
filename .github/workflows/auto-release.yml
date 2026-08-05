@@ -124,8 +124,8 @@ jobs:
         if: ${{ (steps.changes.outputs.has_changes == 'true' || github.event_name != 'schedule') }}
         run: |
           VERSION_FILE="app/build.gradle.kts"
-          sed -i -E "s/^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*$/\1${{ steps.version.outputs.new_version_code }}/" "$VERSION_FILE"
-          sed -i -E "s/^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*$/\1b${{ steps.version.outputs.new_version_name }}\"" "$VERSION_FILE"
+          sed -i -E "s|^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*\x24|\1${{ steps.version.outputs.new_version_code }}|" "$VERSION_FILE"
+          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*\").*(\".*)\x24|\1b${{ steps.version.outputs.new_version_name }}\2|" "$VERSION_FILE"
           echo "--- Updated version:"
           grep -E "versionCode|versionName" "$VERSION_FILE"
 
