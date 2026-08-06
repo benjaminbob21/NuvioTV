@@ -234,7 +234,12 @@ jobs:
 
       - name: Build release APKs
         if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
-        run: ./gradlew :app:assembleFullRelease :app:assemblePlaystoreRelease --stacktrace
+        run: |
+          # Override gradle.properties jvmargs for the build to handle APK packaging
+          gradle_props="gradle.properties"
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx8192m -Dfile.encoding=UTF-8/' "$gradle_props"
+          grep "^org.gradle.jvmargs" "$gradle_props"
+          ./gradlew :app:assembleFullRelease :app:assemblePlaystoreRelease --no-daemon --stacktrace --max-workers=2
 
       - name: Upload build artifacts
         if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
