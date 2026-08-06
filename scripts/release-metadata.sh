@@ -86,6 +86,7 @@ current_bump_subject_lower="$(printf '%s' "$current_bump_subject" | tr '[:upper:
 if [[ "$current_bump_subject_lower" == *hotfix* ]]; then
     release_title="${release_title} Hotfix"
 fi
+release_title="BobNuvio ${release_title}"
 
 printf 'version=%s\n' "$current_version"
 printf 'version_code=%s\n' "$current_version_code"
