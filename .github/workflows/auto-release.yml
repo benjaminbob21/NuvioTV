@@ -226,7 +226,6 @@ jobs:
             echo "::error::RELEASE_METADATA outputs not set. Check release-metadata.sh"
             exit 1
           fi
-        run: |
           ./scripts/generate-release-notes.sh \
             --from "${PREVIOUS_BUMP}" \
             --to "${CURRENT_BUMP}" \
