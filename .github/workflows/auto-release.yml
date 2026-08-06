@@ -163,7 +163,7 @@ jobs:
           rm -f "$COMMIT_FILE"
 
       - name: Set up Java
-        if: steps.gates.outputs.skip != 'true'
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -171,11 +171,11 @@ jobs:
           cache: gradle
 
       - name: Set up Gradle
-        if: steps.gates.outputs.skip != 'true'
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         uses: gradle/actions/setup-gradle@v6
 
       - name: Configure release properties
-        if: steps.gates.outputs.skip != 'true'
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         run: |
           keystore_path="${RUNNER_TEMP}/nuviotv-release.jks"
           printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
@@ -214,12 +214,12 @@ jobs:
           done
 
       - name: Read release metadata
-        if: steps.gates.outputs.skip != 'true'
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         id: release
         run: ./scripts/release-metadata.sh "${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
-        if: steps.gates.outputs.skip != 'true'
+        if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         env:
           PREVIOUS_BUMP: ${{ steps.release.outputs.previous_bump }}
           CURRENT_BUMP: ${{ steps.release.outputs.current_bump }}
