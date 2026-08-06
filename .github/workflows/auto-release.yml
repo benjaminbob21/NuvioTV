@@ -224,13 +224,13 @@ jobs:
         run: |
           # Simple BobNuvio release notes - no upstream commit spam
           printf '# BobNuvio %s\n\n' "${RELEASE_TITLE##BobNuvio }" > release-notes.md
-          printf 'Custom BobNuvio build based on upstream.\n\n' >> release-notes.md
-          printf '## Highlights\n' >> release-notes.md
-          printf '- Custom BobNuvio banner and launcher icons\n' >> release-notes.md
-          printf '- App name overridden to BobNuvio in all supported languages\n' >> release-notes.md
-          printf '- Updated app update repository\n\n' >> release-notes.md
-          printf '## Full changelog\n' >> release-notes.md
-          printf 'Based on upstream changes since %s.\n' "$PREVIOUS_BUMP" >> release-notes.md
+          printf '%s\n\n' 'Custom BobNuvio build based on upstream.' >> release-notes.md
+          printf '%s\n' '## Highlights' >> release-notes.md
+          printf '%s\n' '- Custom BobNuvio banner and launcher icons' >> release-notes.md
+          printf '%s\n' '- App name overridden to BobNuvio in all supported languages' >> release-notes.md
+          printf '%s\n\n' '- Updated app update repository' >> release-notes.md
+          printf '%s\n' '## Full changelog' >> release-notes.md
+          printf '%s\n' "Based on upstream changes since ${PREVIOUS_BUMP}." >> release-notes.md
 
       - name: Build release APKs
         if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
