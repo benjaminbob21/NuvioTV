@@ -149,8 +149,8 @@ android {
         buildConfigField("String", "SPONSOR_NAMES", buildConfigString(sponsorNames))
         buildConfigField("String", "SENTRY_DSN", buildConfigString(sentryDsn))
 
-        // In-app updater (GitHub Releases)
-        buildConfigField("String", "GITHUB_OWNER", "\"tapframe\"")
+        // In-app updater (GitHub Releases) — BobNuvio fork
+        buildConfigField("String", "GITHUB_OWNER", "\"benjaminbob21\"")
         buildConfigField("String", "GITHUB_REPO", "\"NuvioTV\"")
     }
 

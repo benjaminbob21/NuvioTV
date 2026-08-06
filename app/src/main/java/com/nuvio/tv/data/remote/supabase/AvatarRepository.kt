@@ -49,8 +49,19 @@ class AvatarRepository @Inject constructor(
 
     companion object {
         fun avatarImageUrl(storagePath: String): String {
-            val baseUrl = BuildConfig.AVATAR_PUBLIC_BASE_URL.trimEnd('/')
-            return if (baseUrl.isNotEmpty()) "$baseUrl/$storagePath" else storagePath
+            val configuredBase = BuildConfig.AVATAR_PUBLIC_BASE_URL.trimEnd('/')
+            if (configuredBase.isNotEmpty()) {
+                return "$configuredBase/$storagePath"
+            }
+
+            // Fall back to the Supabase public storage bucket so avatars resolve even when
+            // AVATAR_PUBLIC_BASE_URL is not configured for the current build.
+            val supabaseUrl = BuildConfig.SUPABASE_URL.trimEnd('/')
+            if (supabaseUrl.isNotEmpty()) {
+                return "$supabaseUrl/storage/v1/object/public/avatars/${storagePath.trimStart('/')}"
+            }
+
+            return storagePath
         }
     }
 }
