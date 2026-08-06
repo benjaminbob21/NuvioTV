@@ -61,8 +61,8 @@ jobs:
       - name: Check gates (3-week + changes since last release)
         id: gates
         run: |
-          # Only enforce gates on scheduled runs, not manual dispatch
-          if [[ "${{ inputs.mode }}" == "dry-run" ]]; then
+          # Manual dispatch always bypasses gates
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -221,6 +221,11 @@ jobs:
         env:
           PREVIOUS_BUMP: ${{ steps.release.outputs.previous_bump }}
           CURRENT_BUMP: ${{ steps.release.outputs.current_bump }}
+        run: |
+          if [[ -z "${PREVIOUS_BUMP}" ]] || [[ -z "${CURRENT_BUMP}" ]]; then
+            echo "::error::RELEASE_METADATA outputs not set. Check release-metadata.sh"
+            exit 1
+          fi
         run: |
           ./scripts/generate-release-notes.sh \
             --from "${PREVIOUS_BUMP}" \
