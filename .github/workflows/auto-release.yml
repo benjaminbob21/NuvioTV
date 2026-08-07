@@ -215,7 +215,7 @@ jobs:
       - name: Read release metadata
         if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
         id: release
-        run: ./scripts/release-metadata.sh "${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: ./scripts/release-metadata.sh HEAD >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         if: steps.gates.outputs.skip != 'true' && inputs.mode != 'dry-run'
