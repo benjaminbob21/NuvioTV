@@ -57,6 +57,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "4189+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags
 
       - name: Check gates (3-week + changes since last release)
         id: gates
